@@ -170,13 +170,6 @@ BEGIN
         END LOOP;
     EXCEPTION WHEN OTHERS THEN p('   [err] '||SQLERRM); END;
 
-    subsection('C.4  cltb_account_apps_master.auth_status (toutes valeurs)');
-    BEGIN
-        FOR r IN (SELECT auth_status, COUNT(*) nb FROM cltb_account_apps_master
-                   GROUP BY auth_status ORDER BY 2 DESC)
-        LOOP p('   '||RPAD(NVL(r.auth_status,'<null>'),6)||' nb='||r.nb); END LOOP;
-    EXCEPTION WHEN OTHERS THEN p('   [err] '||SQLERRM); END;
-
     subsection('C.5  cltb_account_apps_master.product_category (toutes valeurs)');
     BEGIN
         FOR r IN (
@@ -475,7 +468,6 @@ BEGIN
                 p('   dr_prod_ac           = '||r.dr_prod_ac);
                 p('   cr_prod_ac           = '||r.cr_prod_ac);
                 p('   account_status       = '||r.account_status);
-                p('   auth_status          = '||r.auth_status);
             END LOOP;
         EXCEPTION WHEN OTHERS THEN p('   [contrat err] '||SQLERRM); END;
 
@@ -535,7 +527,7 @@ BEGIN
                        a.ac_no, a.drcr_ind, a.lcy_amount,
                        s.ac_gl_desc
                   FROM actb_history a
-                  LEFT JOIN sttb_account s ON s.ac_no = a.ac_no
+                  LEFT JOIN sttb_account s ON s.ac_gl_no = a.ac_no
                  WHERE a.module='CL'
                    AND a.related_account = v_sample(i)
                  ORDER BY a.trn_dt, a.trn_ref_no, a.drcr_ind) LOOP
@@ -588,7 +580,7 @@ BEGIN
             SELECT a.amount_tag, a.drcr_ind, a.ac_no, s.ac_gl_desc,
                    COUNT(*) nb, SUM(a.lcy_amount) tot
               FROM actb_history a
-              LEFT JOIN sttb_account s ON s.ac_no = a.ac_no
+              LEFT JOIN sttb_account s ON s.ac_gl_no = a.ac_no
              WHERE a.module='CL'
              GROUP BY a.amount_tag, a.drcr_ind, a.ac_no, s.ac_gl_desc
              ORDER BY a.amount_tag, a.drcr_ind, a.ac_no)
