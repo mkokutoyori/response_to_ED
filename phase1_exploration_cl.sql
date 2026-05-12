@@ -74,6 +74,14 @@ DECLARE
     END;
 
 BEGIN
+    -- Lever le plafond du buffer DBMS_OUTPUT depuis le bloc lui-meme.
+    -- Necessaire si le client (SQL Developer en mode Execute / F9, par ex.)
+    -- n'a pas execute le SET SERVEROUTPUT ON SIZE UNLIMITED ci-dessus.
+    -- DBMS_OUTPUT.ENABLE(NULL) => buffer illimite cote serveur.
+    BEGIN
+        DBMS_OUTPUT.ENABLE(NULL);
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+
     p(v_sep);
     p('EXPLORATION FLEXCUBE MODULE CL - PHASE 1 (extraction sans hypothese)');
     p('Date : '||TO_CHAR(SYSDATE,'DD-MON-YYYY HH24:MI:SS'));
