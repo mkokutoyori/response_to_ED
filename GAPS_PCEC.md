@@ -7,6 +7,58 @@
 
 ---
 
+## Mise à jour du 12-MAY-2026 — Findings de la requête de découverte
+
+La requête `SELECT DISTINCT SUBSTR(ac_no,1,3)...` proposée en §11 a été exécutée sur la base. Résultats sur les classes 6, 7, 9 :
+
+| Code | Libellé SCB | Nb | Statut |
+|------|-------------|----|----|
+| **691** | DOT PROV DEPREC CLT | **154** | ✅ Dotations confirmées au compte PCEC standard |
+| **791** | REP SUR PROV PR DEPREC CPTES CLTELE | **12** | ✅ Reprises confirmées au compte PCEC standard |
+| **792** | RENTRÉES SUR CRÉANCES ABANDONNÉES | **2** | ✅ Existe ! À inclure dans le pattern reprises |
+| **679** | PERTE SUR OPS CLIENTELE | **31** | ⚠️ **Spécificité SCB** : remplace 6921/6922 |
+| 6921 / 6922 | — | **0** | Absents du plan effectif |
+| 6913 / 7913 | — | **0** | SCB n'utilise que le niveau 3 chiffres (691, 791) |
+| **985** | INTERETS RESERVES SUR CREANCE EN SOUFFRANCE | **870** | ✅ confirmé |
+| **997** | INTERETS ET COMMISSION RESERVES | **870** | ✅ confirmé (symétrique 985) |
+| 712 | INT. SUR LES CREDITS A MOYEN TERME | 204 615 | ✓ |
+| 713 | INT SUR PRET RELATIF AU TRADE | 50 150 | ✓ |
+| 714 | INT SUR LES CPTES DEBITEURS DE LA CLIENTELE | 9 913 | ✓ |
+| 717 | COMM./CPTES DEBITEURS CLIENTELE | 6 643 | ✓ |
+| 719 | PENALITE DE REMBOURSEMENT ANTICIPE | 640 | ✓ |
+
+### Décision actée
+
+Le script `phase2_audit_provisions_cl.sql` a été corrigé en conséquence :
+
+```sql
+-- Avant (gap)                        -- Apres (PCEC SCB)
+g_re_dotations      := '^693';        g_re_dotations := '^691[0-9]*$';
+g_re_reprises       := '^793';        g_re_reprises  := '^79[12][0-9]*$';
+g_re_pertes_couv    := '^6921';   →   g_re_pertes    := '^(679|6921|6922)[0-9]*$';
+g_re_pertes_noncouv := '^6922';   →   (un seul pattern, SCB n'opere pas la distinction)
+```
+
+La section G a été restructurée :
+- **G.5** : passage en perte est désormais `DR 679 / CR 34` (sans ventilation couvert/non couvert)
+- **G.4** : reprises (791) et rentrées sur créances abandonnées (792) sont distinguées dans l'affichage
+- **G.6** : agrégation par contrat ne ventile plus couvert/non couvert (`cum_perte` unique)
+- **J Synthèse** : libellés alignés avec les comptes réels SCB
+
+### Implications pour l'analyse
+
+1. Le ratio **dotations (154 écr.) / reprises (12 écr.) = 12,8** indique une période de durcissement net du provisionnement. À investiguer dans G.3 et G.4 par cycle financier (FY2022-FY2026) pour identifier les exercices concernés.
+
+2. Le compte **679 n'a que 31 écritures** au total. Le nombre de **passages en perte effectif** sur la période d'audit est donc très limité. L'audit devra vérifier :
+   - si toutes les créances en 345 (autres douteuses) anciennes ont été soit passées en perte (679), soit suffisamment provisionnées (39x)
+   - si la pratique SCB de non-distinction `679` vs `6921/6922` est conforme aux exigences COBAC de reporting (CERBER / FINREP)
+
+3. Le compte **792** (rentrées sur créances abandonnées) ne compte que **2 écritures** : taux de recouvrement post-write-off très faible. À examiner les 2 cas.
+
+4. La symétrie parfaite **985 = 870 écr. = 997** confirme que toutes les écritures `MAIN_INT_SACR` du module CL sont correctement adossées en hors-bilan.
+
+---
+
 ## Synthèse exécutive
 
 | Gap | Sévérité | Impact sur l'audit |

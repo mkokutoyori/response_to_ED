@@ -71,13 +71,34 @@ DECLARE
     g_re_int_reserve_dr VARCHAR2(40) := '^985[0-9]{6}$';            -- DR reserve interets
     g_re_int_reserve_cr VARCHAR2(40) := '^997[0-9]{6}$';            -- CR reserve interets
     g_re_revenue_int    VARCHAR2(40) := '^71[0-9]{6}$';             -- compte produits interets
-    -- Cycle de vie OHADA des provisions sur creances
-    g_re_creanc_souff   VARCHAR2(40) := '^34[0-9]+$';               -- 34x  creances en souffrance
-    g_re_provisions     VARCHAR2(40) := '^39[0-9]+$';               -- 39x  provisions depreciation creances
-    g_re_dotations      VARCHAR2(40) := '^693[0-9]*$';              -- 693x charges - dotations provisions
-    g_re_pertes_couv    VARCHAR2(40) := '^6921[0-9]*$';             -- 6921 pertes couvertes par provision
-    g_re_pertes_noncouv VARCHAR2(40) := '^6922[0-9]*$';             -- 6922 pertes NON couvertes
-    g_re_reprises       VARCHAR2(40) := '^793[0-9]*$';              -- 793x produits - reprises provisions
+    -- Cycle de vie PCEC COBAC des provisions sur creances clientele
+    -- (codes corriges suite a la decouverte ac_no SCB Cameroun)
+    --
+    -- Reference PCEC COBAC R-98/01 :
+    --   34x   Creances en souffrance         (341 impayees, 342 immobilisees,
+    --                                         343 doute_gar_Etat, 344 doute_gar_suretes,
+    --                                         345 autres doute, 346/347 credit-bail)
+    --   39x   Provisions depreciation clientele (391-396)
+    --   691   Dotations aux provisions       (6913 specifique clientele en theorie,
+    --                                         mais SCB n'utilise que 691 a 3 chiffres)
+    --   791   Reprises de provisions         (7913 en theorie, agrege en 791 chez SCB)
+    --   792   Rentrees sur creances abandonnees (PCEC les assimile aux reprises)
+    --   985   Interets reserves sur creances en souffrance (hors bilan)
+    --   997   Interets et commissions reservees (contrepartie hors bilan)
+    --
+    -- Specificite SCB : les pertes sur creances irrecouvrables sont enregistrees
+    -- en compte 679 "PERTE SUR OPS CLIENTELE" (et non en 6921/6922 du PCEC standard).
+    -- Il n'y a donc PAS de distinction couvert/non couvert au niveau comptable.
+    -- On laisse neanmoins le pattern accepter 6921/6922 par defense en cas
+    -- d'evolution future.
+    g_re_creanc_souff   VARCHAR2(40) := '^34[0-9]+$';
+    g_re_provisions     VARCHAR2(40) := '^39[0-9]+$';
+    g_re_dotations      VARCHAR2(40) := '^691[0-9]*$';              -- corrige : 691 et non 693
+    g_re_reprises       VARCHAR2(40) := '^79[12][0-9]*$';           -- corrige : 791 + 792
+    g_re_pertes         VARCHAR2(40) := '^(679|6921|6922)[0-9]*$';  -- 679 (SCB) + 6921/6922 PCEC standard
+    -- Conserves pour granularite si jamais SCB ventile un jour
+    g_re_pertes_couv    VARCHAR2(40) := '^6921[0-9]*$';
+    g_re_pertes_noncouv VARCHAR2(40) := '^6922[0-9]*$';
 
     --==========================================================================
     -- Helpers d'affichage
@@ -587,40 +608,46 @@ BEGIN
     EXCEPTION WHEN OTHERS THEN p('[F.2 err] '||SQLERRM); END;
 
     --==========================================================================
-    -- SECTION G : CYCLE DE VIE OHADA DES PROVISIONS - 3 ETAPES
+    -- SECTION G : CYCLE DE VIE DES PROVISIONS - 3 ETAPES (PCEC COBAC + SCB)
     --==========================================================================
-    -- Logique OHADA / SYSCOHADA :
+    -- Logique PCEC COBAC R-98/01, adaptee a la pratique observee SCB Cameroun :
     --   ETAPE 1 - DOTATION (creation/augmentation provision)
-    --     DR 6931 Dotations aux provisions  CR 394 Provisions creances douteuses
-    --   ETAPE 2A - AJUSTEMENT EN HAUSSE (meme schema que dotation, pour le delta)
+    --     DR 691 Dotations aux provisions  CR 39x Provisions creances depreciees
+    --     (Theoriquement 6913 specifique clientele - SCB agrege en 691)
+    --   ETAPE 2A - AJUSTEMENT EN HAUSSE = meme schema que dotation, pour le delta
     --   ETAPE 2B - AJUSTEMENT EN BAISSE / REPRISE
-    --     DR 394 Provisions  CR 7931 Reprises de provisions
+    --     DR 39x Provisions  CR 791 Reprises de provisions
+    --     (Theoriquement 7913 - SCB agrege en 791)
     --   ETAPE 3A - REMBOURSEMENT INTEGRAL : reprise totale (idem 2B)
-    --   ETAPE 3B - PERTE COUVERTE
-    --     DR 6921 Pertes sur creances irrec. couvertes  CR 34 Creances en souffrance
-    --     DR 394  Provisions                            CR 7931 Reprises
-    --   ETAPE 3C - PERTE NON COUVERTE (perte > provision constituee)
-    --     DR 6921 Pertes couvertes      \
-    --     DR 6922 Pertes NON couvertes   } CR 34 Creances en souffrance
-    --     DR 394  Provisions             CR 7931 Reprises
+    --   ETAPE 3B - RENTREE SUR CREANCE ABANDONNEE (apres passage en perte)
+    --     DR 5xx Tresorerie  CR 792 Rentrees sur creances abandonnees
+    --   ETAPE 3C - PASSAGE EN PERTE  (specificite SCB : pas de distinction
+    --              couvert / non couvert ; tout passe en 679 et non 6921/6922)
+    --     DR 679 Pertes sur ops clientele  CR 34x Creances en souffrance
+    --     DR 39x Provisions                 CR 791 Reprises (extournes le stock)
+    --
+    -- Pattern de decouverte (executee manuellement) confirme :
+    --   691 nb=154   791 nb=12    792 nb=2    679 nb=31
+    --   985 nb=870   997 nb=870
+    --   6921, 6922, 6913, 7913 : ABSENTS du plan effectif
     --
     -- Constat phase 1 : aucun tag du module CL ne porte ces ecritures - les
     -- dotations / reprises / pertes sont passees par un AUTRE module (DE/GL
-    -- manuel ou batch externe). On identifie ici tous ces mouvements.
+    -- manuel ou batch externe).
     --==========================================================================
-    section('G','CYCLE DE VIE OHADA DES PROVISIONS (3 ETAPES)');
+    section('G','CYCLE DE VIE DES PROVISIONS (PCEC COBAC adapte pratique SCB)');
 
-    sub('G.1  Inventaire des comptes-cles du cycle (34 / 39 / 6921 / 6922 / 6931 / 7931)');
+    sub('G.1  Inventaire des comptes-cles du cycle (34 / 39 / 679 / 691 / 791 / 792)');
     BEGIN
         FOR r IN (
             SELECT a.ac_no, MAX(s.ac_gl_desc) gl_desc,
                    CASE
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)      THEN '1-DOTATION 693'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_reprises)       THEN '2-REPRISE  793'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_couv)    THEN '3-PERTE_C  6921'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv) THEN '3-PERTE_NC 6922'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)     THEN '0-PROV     39x'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff)   THEN '0-SOUFFR   34x'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)    THEN '1-DOTATION 691'
+                     WHEN REGEXP_LIKE(a.ac_no, '^792[0-9]*$')     THEN '2-RENTREE  792'
+                     WHEN REGEXP_LIKE(a.ac_no, '^791[0-9]*$')     THEN '2-REPRISE  791'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes)       THEN '3-PERTE    679'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)   THEN '0-PROV     39x'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff) THEN '0-SOUFFR   34x'
                    END type_compte,
                    COUNT(*) nb,
                    SUM(CASE WHEN a.drcr_ind='D' THEN a.lcy_amount ELSE 0 END) tot_dr,
@@ -631,8 +658,7 @@ BEGIN
              WHERE ( REGEXP_LIKE(a.ac_no, g_re_creanc_souff)
                   OR REGEXP_LIKE(a.ac_no, g_re_provisions)
                   OR REGEXP_LIKE(a.ac_no, g_re_dotations)
-                  OR REGEXP_LIKE(a.ac_no, g_re_pertes_couv)
-                  OR REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv)
+                  OR REGEXP_LIKE(a.ac_no, g_re_pertes)
                   OR REGEXP_LIKE(a.ac_no, g_re_reprises) )
                AND a.trn_dt <= g_ref_date
              GROUP BY a.ac_no
@@ -652,12 +678,12 @@ BEGIN
         FOR r IN (
             SELECT a.module,
                    CASE
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)      THEN '1-DOTATION 693'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_reprises)       THEN '2-REPRISE  793'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_couv)    THEN '3-PERTE_C  6921'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv) THEN '3-PERTE_NC 6922'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)     THEN '0-PROV     39x'
-                     WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff)   THEN '0-SOUFFR   34x'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)    THEN '1-DOTATION 691'
+                     WHEN REGEXP_LIKE(a.ac_no, '^792[0-9]*$')     THEN '2-RENTREE  792'
+                     WHEN REGEXP_LIKE(a.ac_no, '^791[0-9]*$')     THEN '2-REPRISE  791'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_pertes)       THEN '3-PERTE    679'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)   THEN '0-PROV     39x'
+                     WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff) THEN '0-SOUFFR   34x'
                    END type_compte,
                    COUNT(*) nb,
                    COUNT(DISTINCT a.related_account) nb_contrats,
@@ -668,18 +694,17 @@ BEGIN
              WHERE ( REGEXP_LIKE(a.ac_no, g_re_creanc_souff)
                   OR REGEXP_LIKE(a.ac_no, g_re_provisions)
                   OR REGEXP_LIKE(a.ac_no, g_re_dotations)
-                  OR REGEXP_LIKE(a.ac_no, g_re_pertes_couv)
-                  OR REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv)
+                  OR REGEXP_LIKE(a.ac_no, g_re_pertes)
                   OR REGEXP_LIKE(a.ac_no, g_re_reprises) )
                AND a.trn_dt <= g_ref_date
              GROUP BY a.module,
                       CASE
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)      THEN '1-DOTATION 693'
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_reprises)       THEN '2-REPRISE  793'
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_couv)    THEN '3-PERTE_C  6921'
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv) THEN '3-PERTE_NC 6922'
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)     THEN '0-PROV     39x'
-                        WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff)   THEN '0-SOUFFR   34x'
+                        WHEN REGEXP_LIKE(a.ac_no, g_re_dotations)    THEN '1-DOTATION 691'
+                        WHEN REGEXP_LIKE(a.ac_no, '^792[0-9]*$')     THEN '2-RENTREE  792'
+                        WHEN REGEXP_LIKE(a.ac_no, '^791[0-9]*$')     THEN '2-REPRISE  791'
+                        WHEN REGEXP_LIKE(a.ac_no, g_re_pertes)       THEN '3-PERTE    679'
+                        WHEN REGEXP_LIKE(a.ac_no, g_re_provisions)   THEN '0-PROV     39x'
+                        WHEN REGEXP_LIKE(a.ac_no, g_re_creanc_souff) THEN '0-SOUFFR   34x'
                       END
              ORDER BY a.module, type_compte)
         LOOP
@@ -691,7 +716,7 @@ BEGIN
         END LOOP;
     EXCEPTION WHEN OTHERS THEN p('[G.2 err] '||SQLERRM); END;
 
-    sub('G.3  ETAPE 1 - DOTATIONS (DR 693x / CR 39x) - flux annuel');
+    sub('G.3  ETAPE 1 - DOTATIONS (DR 691 / CR 39x) - flux annuel');
     -- Par exercice (financial_cycle), volume des dotations effectives.
     BEGIN
         FOR r IN (
@@ -710,23 +735,25 @@ BEGIN
              ORDER BY a.financial_cycle)
         LOOP
             p('   cycle='||RPAD(r.financial_cycle,8)
-              ||' charge_693='||fmt_n(r.dot_charge)
+              ||' charge_691='||fmt_n(r.dot_charge)
               ||' credit_39='||fmt_n(r.dot_provision)
               ||' ecart='||fmt_n(r.dot_charge - r.dot_provision)
               ||' nb_ecr='||r.nb_ecr_dotation);
         END LOOP;
     EXCEPTION WHEN OTHERS THEN p('[G.3 err] '||SQLERRM); END;
 
-    sub('G.4  ETAPE 2 - REPRISES (DR 39x / CR 793x) - flux annuel');
+    sub('G.4  ETAPE 2 - REPRISES (DR 39x / CR 791) et RENTREES (CR 792) - flux annuel');
     BEGIN
         FOR r IN (
             SELECT a.financial_cycle,
                    SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_provisions) AND a.drcr_ind='D'
                             THEN a.lcy_amount ELSE 0 END) rep_provision,
-                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_reprises) AND a.drcr_ind='C'
-                            THEN a.lcy_amount ELSE 0 END) rep_produit,
+                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,'^791[0-9]*$') AND a.drcr_ind='C'
+                            THEN a.lcy_amount ELSE 0 END) rep_791,
+                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,'^792[0-9]*$') AND a.drcr_ind='C'
+                            THEN a.lcy_amount ELSE 0 END) rent_792,
                    COUNT(DISTINCT CASE WHEN REGEXP_LIKE(a.ac_no,g_re_reprises)
-                                       THEN a.trn_ref_no END) nb_ecr_reprise
+                                       THEN a.trn_ref_no END) nb_ecr
               FROM actb_history a
              WHERE a.trn_dt <= g_ref_date
                AND ( REGEXP_LIKE(a.ac_no, g_re_reprises)
@@ -736,36 +763,39 @@ BEGIN
         LOOP
             p('   cycle='||RPAD(r.financial_cycle,8)
               ||' debit_39='||fmt_n(r.rep_provision)
-              ||' produit_793='||fmt_n(r.rep_produit)
-              ||' ecart='||fmt_n(r.rep_provision - r.rep_produit)
-              ||' nb_ecr='||r.nb_ecr_reprise);
+              ||' reprise_791='||fmt_n(r.rep_791)
+              ||' rentree_792='||fmt_n(r.rent_792)
+              ||' nb_ecr='||r.nb_ecr);
         END LOOP;
     EXCEPTION WHEN OTHERS THEN p('[G.4 err] '||SQLERRM); END;
 
-    sub('G.5  ETAPE 3 - PERTES COUVERTES (6921) et NON COUVERTES (6922)');
+    sub('G.5  ETAPE 3 - PASSAGE EN PERTE (DR 679 / CR 34x) - flux annuel');
+    -- Specificite SCB : pas de distinction couvert/non couvert. Tout passe en 679.
+    -- On suit en plus toute autre ecriture 6921/6922 par defense (en theorie absente).
     BEGIN
         FOR r IN (
             SELECT a.financial_cycle,
-                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes_couv) AND a.drcr_ind='D'
+                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,'^679[0-9]*$') AND a.drcr_ind='D'
+                            THEN a.lcy_amount ELSE 0 END) perte_679,
+                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,'^6921[0-9]*$') AND a.drcr_ind='D'
                             THEN a.lcy_amount ELSE 0 END) perte_couv,
-                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes_noncouv) AND a.drcr_ind='D'
+                   SUM(CASE WHEN REGEXP_LIKE(a.ac_no,'^6922[0-9]*$') AND a.drcr_ind='D'
                             THEN a.lcy_amount ELSE 0 END) perte_noncouv,
                    SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_creanc_souff) AND a.drcr_ind='C'
                             THEN a.lcy_amount ELSE 0 END) sortie_34,
-                   COUNT(DISTINCT CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes_couv)
-                                       OR REGEXP_LIKE(a.ac_no,g_re_pertes_noncouv)
+                   COUNT(DISTINCT CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes)
                                        THEN a.related_account END) nb_dossiers
               FROM actb_history a
              WHERE a.trn_dt <= g_ref_date
-               AND ( REGEXP_LIKE(a.ac_no, g_re_pertes_couv)
-                  OR REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv)
+               AND ( REGEXP_LIKE(a.ac_no, g_re_pertes)
                   OR REGEXP_LIKE(a.ac_no, g_re_creanc_souff) )
              GROUP BY a.financial_cycle
              ORDER BY a.financial_cycle)
         LOOP
             p('   cycle='||RPAD(r.financial_cycle,8)
-              ||' perte_couv_6921='||fmt_n(r.perte_couv)
-              ||' perte_NC_6922='||fmt_n(r.perte_noncouv)
+              ||' perte_679='||fmt_n(r.perte_679)
+              ||' (6921='||fmt_n(r.perte_couv)
+              ||' 6922='||fmt_n(r.perte_noncouv)||')'
               ||' sortie_34='||fmt_n(r.sortie_34)
               ||' nb_dossiers='||r.nb_dossiers);
         END LOOP;
@@ -781,10 +811,8 @@ BEGIN
                                 THEN a.lcy_amount ELSE 0 END) cum_dotation,
                        SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_reprises) AND a.drcr_ind='C'
                                 THEN a.lcy_amount ELSE 0 END) cum_reprise,
-                       SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes_couv) AND a.drcr_ind='D'
-                                THEN a.lcy_amount ELSE 0 END) cum_perte_couv,
-                       SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes_noncouv) AND a.drcr_ind='D'
-                                THEN a.lcy_amount ELSE 0 END) cum_perte_ncouv,
+                       SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_pertes) AND a.drcr_ind='D'
+                                THEN a.lcy_amount ELSE 0 END) cum_perte,
                        SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_creanc_souff) AND a.drcr_ind='D'
                                 THEN a.lcy_amount
                                 WHEN REGEXP_LIKE(a.ac_no,g_re_creanc_souff) AND a.drcr_ind='C'
@@ -800,8 +828,7 @@ BEGIN
                    AND ( REGEXP_LIKE(a.ac_no, g_re_creanc_souff)
                       OR REGEXP_LIKE(a.ac_no, g_re_provisions)
                       OR REGEXP_LIKE(a.ac_no, g_re_dotations)
-                      OR REGEXP_LIKE(a.ac_no, g_re_pertes_couv)
-                      OR REGEXP_LIKE(a.ac_no, g_re_pertes_noncouv)
+                      OR REGEXP_LIKE(a.ac_no, g_re_pertes)
                       OR REGEXP_LIKE(a.ac_no, g_re_reprises) )
                  GROUP BY a.related_account
                  ORDER BY ABS(SUM(CASE WHEN REGEXP_LIKE(a.ac_no,g_re_provisions) AND a.drcr_ind='C'
@@ -811,12 +838,11 @@ BEGIN
             ) WHERE ROWNUM <= g_top_n)
         LOOP
             p('   '||RPAD(r.related_account,22)
-              ||' dot='||fmt_n(r.cum_dotation)
-              ||' rep='||fmt_n(r.cum_reprise)
-              ||' perte_C='||fmt_n(r.cum_perte_couv)
-              ||' perte_NC='||fmt_n(r.cum_perte_ncouv)
-              ||' solde34='||fmt_n(r.solde_34)
-              ||' solde39='||fmt_n(r.solde_39));
+              ||' dot_691='||fmt_n(r.cum_dotation)
+              ||' rep_791_792='||fmt_n(r.cum_reprise)
+              ||' perte_679='||fmt_n(r.cum_perte)
+              ||' solde_34='||fmt_n(r.solde_34)
+              ||' solde_39='||fmt_n(r.solde_39));
         END LOOP;
     EXCEPTION WHEN OTHERS THEN p('[G.6 err] '||SQLERRM); END;
 
@@ -1191,8 +1217,7 @@ BEGIN
         v_solde_34          NUMBER := 0;
         v_dot_cumul         NUMBER := 0;
         v_rep_cumul         NUMBER := 0;
-        v_perte_couv        NUMBER := 0;
-        v_perte_ncouv       NUMBER := 0;
+        v_perte_total       NUMBER := 0;
         v_nb_anom_reclas    NUMBER := 0;
         v_nb_sous_provis    NUMBER := 0;
     BEGIN
@@ -1261,14 +1286,13 @@ BEGIN
 
         -- cumul des dotations / reprises / pertes sur toute la periode disponible
         BEGIN
-            SELECT NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_dotations)      AND drcr_ind='D' THEN lcy_amount ELSE 0 END),0),
-                   NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_reprises)       AND drcr_ind='C' THEN lcy_amount ELSE 0 END),0),
-                   NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_pertes_couv)    AND drcr_ind='D' THEN lcy_amount ELSE 0 END),0),
-                   NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_pertes_noncouv) AND drcr_ind='D' THEN lcy_amount ELSE 0 END),0),
+            SELECT NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_dotations) AND drcr_ind='D' THEN lcy_amount ELSE 0 END),0),
+                   NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_reprises)  AND drcr_ind='C' THEN lcy_amount ELSE 0 END),0),
+                   NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_pertes)    AND drcr_ind='D' THEN lcy_amount ELSE 0 END),0),
                    NVL(SUM(CASE WHEN REGEXP_LIKE(ac_no,g_re_creanc_souff)
                                 THEN CASE WHEN drcr_ind='D' THEN lcy_amount ELSE -lcy_amount END
                                 ELSE 0 END),0)
-              INTO v_dot_cumul, v_rep_cumul, v_perte_couv, v_perte_ncouv, v_solde_34
+              INTO v_dot_cumul, v_rep_cumul, v_perte_total, v_solde_34
               FROM actb_history WHERE trn_dt <= g_ref_date;
         EXCEPTION WHEN OTHERS THEN NULL; END;
 
@@ -1298,13 +1322,12 @@ BEGIN
         p('  Solde compte 985xxx (DR int. reserves)     : '||fmt_n(v_solde_985));
         p('  Solde compte 997xxx (CR int. reserves)     : '||fmt_n(v_solde_997));
         p(' ');
-        p('  --- Cycle de vie OHADA des provisions ---');
-        p('  Etape 1 - Dotations cumulees    (DR 693)   : '||fmt_n(v_dot_cumul));
-        p('  Etape 2 - Reprises cumulees     (CR 793)   : '||fmt_n(v_rep_cumul));
-        p('  Etape 3 - Pertes couvertes      (DR 6921)  : '||fmt_n(v_perte_couv));
-        p('  Etape 3 - Pertes NON couvertes  (DR 6922)  : '||fmt_n(v_perte_ncouv));
-        p('  Stock courant provisions        (solde 39) : '||fmt_n(v_solde_provisions));
-        p('  Stock courant creances souffr.  (solde 34) : '||fmt_n(v_solde_34));
+        p('  --- Cycle de vie PCEC COBAC des provisions (codes confirmes SCB) ---');
+        p('  Etape 1 - Dotations cumulees       (DR 691)     : '||fmt_n(v_dot_cumul));
+        p('  Etape 2 - Reprises+rentrees cumulees (CR 791+792) : '||fmt_n(v_rep_cumul));
+        p('  Etape 3 - Pertes cumulees          (DR 679)     : '||fmt_n(v_perte_total));
+        p('  Stock courant provisions           (solde 39)   : '||fmt_n(v_solde_provisions));
+        p('  Stock courant creances souffrance  (solde 34)   : '||fmt_n(v_solde_34));
         p(' ');
         p('  --- Anomalies remontees ---');
         p('  Nb contrats DPD>'||g_dpd_sub||'j sans aucun reclassement : '||LPAD(v_nb_anom_reclas,10));
