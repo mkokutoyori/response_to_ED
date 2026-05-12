@@ -194,10 +194,13 @@ BEGIN
     subsection('C.6  cltb_account_apps_master.product_code (top 30)');
     BEGIN
         FOR r IN (
-            SELECT product_code, COUNT(*) nb,
-                   SUM(amount_financed) tot_fin
-              FROM cltb_account_apps_master
-             GROUP BY product_code ORDER BY 2 DESC FETCH FIRST 30 ROWS ONLY)
+            SELECT * FROM (
+                SELECT product_code, COUNT(*) nb,
+                       SUM(amount_financed) tot_fin
+                  FROM cltb_account_apps_master
+                 GROUP BY product_code
+                 ORDER BY 2 DESC
+            ) WHERE ROWNUM <= 30)
         LOOP
             p('   '||RPAD(r.product_code,10)||' nb='||LPAD(r.nb,6)
               ||' finance_total='||TO_CHAR(r.tot_fin,'FM999G999G999G990D00'));
